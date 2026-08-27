@@ -7,9 +7,8 @@ local BEEP = (__dirname or '.') .. '/beep.wav'
 local DEFAULTS = {
   enabled     = true,
   range       = 300,    -- how far ahead along the road to warn about, metres
-  volume      = 1.2,
-  staticPitch = false,  -- true: hold basePitch; false: let it rise as cars near
-  basePitch   = 0.95,   -- pitch of the beep at maximum range
+  volume      = 1.4,
+  beepSpeed   = 1.0,    -- multiplies how rapidly the beeps repeat
 }
 
 local ok, stored = pcall(ac.storage, DEFAULTS)
@@ -34,13 +33,21 @@ local FLIP_M       = 50     -- travel the other way needed to reverse one, metre
 -- further than its own speed allows is discarded; if that keeps happening the
 -- car really moved (pit respawn, teleport) and is relocated
 local JUMP_FACTOR  = 2.5    -- multiple of its own speed a car may appear to move
-local JUMP_MARGIN  = 8      -- slack, metres
-local LOST_T       = 0.5    -- impossible readings -> a teleport
+local JUMP_MARGIN  = 8      -- plus this much slack, metres
+local LOST_T       = 0.5    -- impossible readings for this long means a teleport
 
--- Beep character
-local PITCH_RISE   = 0.55   -- how far the pitch climbs from max range to nil range
-local BEEP_FAST    = 0.12   -- gap between beeps at nil range, seconds
-local BEEP_SLOW    = 0.90   -- extra gap between beeps at max range, seconds
+-- Searching the whole road is the one expensive operation here, so a car that
+-- cannot be placed on it at all (parked in a paddock, spectating, sitting on
+-- an unrecorded side road) is retried a few times a second rather than on
+-- every frame.
+local RELOCATE_T   = 0.4    -- seconds between full-road searches, per car
+
+-- Beep
+local BEEP_LEN     = 0.26   -- length of beep.wav, seconds
+local BEEP_TAIL    = 0.02   -- breathing room after it finishes, seconds
+local BEEP_MIN     = BEEP_LEN + BEEP_TAIL   -- a beep can never restart sooner
+local BEEP_FAST    = 0.28   -- gap between beeps at nil range, seconds
+local BEEP_SLOW    = 0.80   -- extra gap between beeps at max range, seconds
 
 --------------------------------------------------------------------------
 -- Road files
@@ -66,6 +73,7 @@ local KEY = trackKey()
 
 local points     = {}    -- road as recorded, in driving order
 local along      = {}    -- metres travelled along the road at each point
+local pointCount = 0     -- kept alongside points so the search loop avoids #
 local roadLen    = 0
 local loadedFrom = nil   -- 'app' or 'documents', for the panel (incase app writing is blocked)
 
@@ -83,7 +91,8 @@ end
 -- Measure the real distance between recorded points
 local function measureRoad()
   along, roadLen = {}, 0
-  if #points < 2 then return end
+  pointCount = #points
+  if pointCount < 2 then return end
   along[1] = 0
   for i = 2, #points do
     local a, b = points[i - 1], points[i]
@@ -94,7 +103,7 @@ local function measureRoad()
 end
 
 local function loadTrack()
-  points, along, roadLen, loadedFrom = {}, {}, 0, nil
+  points, along, pointCount, roadLen, loadedFrom = {}, {}, 0, 0, nil
 
   local candidates = { APP_TRACKS .. '/' .. KEY .. '.txt' }
   if DOC_TRACKS then candidates[#candidates + 1] = DOC_TRACKS .. '/' .. KEY .. '.txt' end
@@ -151,49 +160,58 @@ loadTrack()
 
 local beep = nil
 
-local function playBeep(pitch, volume)
+local function playBeep(volume)
   if not (ac and ac.AudioEvent) then return end
   if beep ~= nil then beep:dispose() end
   beep = ac.AudioEvent.fromFile({ filename = BEEP, use3D = false, loop = false }, false)
-  beep.pitch  = pitch
   beep.volume = volume
   beep:start()
+  beep.volume = volume
 end
 
--- Pitch for a car at normalised distance t (0 = on top, 1 = max range).
-local function pitchFor(t)
-  if settings.staticPitch then return settings.basePitch end
-  return settings.basePitch + PITCH_RISE * (1 - t)
+-- Seconds until the next beep for a car at normalised distance t. 
+-- Never shorter than the sample takes to play.
+local function intervalFor(t)
+  local interval = (BEEP_FAST + BEEP_SLOW * t) / math.max(settings.beepSpeed, 0.05)
+  if interval < BEEP_MIN then return BEEP_MIN end
+  return interval
 end
 
 --------------------------------------------------------------------------
 -- Locating cars on the road
 --------------------------------------------------------------------------
 
+-- Squared distances throughout: comparing them orders points identically to
+-- real distances and avoids a square root per point.
+local MAX_SNAP_SQ = MAX_SNAP_D * MAX_SNAP_D
+
 local function nearestInRange(x, y, z, first, last)
-  local bestIndex, bestSq
+  local bestIndex, bestSq = nil, math.huge
   for i = first, last do
     local p = points[i]
     local dx, dy, dz = x - p.x, y - p.y, z - p.z
     local sq = dx*dx + dy*dy + dz*dz
-    if bestSq == nil or sq < bestSq then bestSq, bestIndex = sq, i end
+    if sq < bestSq then bestSq, bestIndex = sq, i end
   end
-  return bestIndex, bestSq
+  return bestIndex, bestSq         -- bestSq stays huge if the range was empty
 end
 
 -- Searches the whole road. Used only when a car has no known position yet.
 local function locate(x, y, z)
-  local index, sq = nearestInRange(x, y, z, 1, #points)
-  if sq == nil or sq > MAX_SNAP_D * MAX_SNAP_D then return nil end
+  local index, sq = nearestInRange(x, y, z, 1, pointCount)
+  if sq > MAX_SNAP_SQ then return nil end
   return index
 end
 
 -- Searches near where the car was last seen, which keeps it from jumping to
 -- the far side of a hairpin where the road passes close to itself.
 local function locateNear(x, y, z, lastIndex)
-  local index, sq = nearestInRange(x, y, z,
-    math.max(1, lastIndex - SNAP_WIN), math.min(#points, lastIndex + SNAP_WIN))
-  if sq == nil or sq > MAX_SNAP_D * MAX_SNAP_D then return nil end
+  local first = lastIndex - SNAP_WIN
+  local last  = lastIndex + SNAP_WIN
+  if first < 1 then first = 1 end
+  if last > pointCount then last = pointCount end
+  local index, sq = nearestInRange(x, y, z, first, last)
+  if sq > MAX_SNAP_SQ then return nil end
   return index
 end
 
@@ -206,16 +224,18 @@ end
 --   dir     +1 travelling the way the road was recorded, -1 against it, 0 unknown
 --   mark    furthest point reached so far in the current direction, metres along
 --   lost    seconds of consecutive impossible readings
+--   retry   used on freshstart or failsafe against scanning 
 
 local function forget(state, index)
   state.index = index
   state.dir   = 0
   state.mark  = index and along[index] or nil
   state.lost  = 0
+  state.retry = 0
 end
 
 -- Updates a car's direction from how its position along the road moves. The
--- mark trails the furthest point reached, so backtracking must exceed FLIP_M
+-- mark trails the furthest point reached. Backtracking must exceed FLIP_M
 -- before the direction reverses.
 local function updateDirection(state)
   local here = along[state.index]
@@ -241,7 +261,11 @@ end
 -- relocated from scratch once they have been rejected for LOST_T.
 local function trackCar(state, x, y, z, speedKmh, dt)
   if state.index == nil then
-    forget(state, locate(x, y, z))
+    state.retry = state.retry - dt
+    if state.retry > 0 then return end
+    state.retry = RELOCATE_T
+    local found = locate(x, y, z)
+    if found ~= nil then forget(state, found) end
     return
   end
 
@@ -266,11 +290,11 @@ local function trackCar(state, x, y, z, speedKmh, dt)
 end
 
 --------------------------------------------------------------------------
--- Live update loop
+-- Live state
 --------------------------------------------------------------------------
 
 local others    = {}   -- per-car tracking state, keyed by car index
-local player    = { index = nil, dir = 0, mark = nil, lost = 0 }
+local player    = { index = nil, dir = 0, mark = nil, lost = 0, retry = 0 }
 local beepTimer = 0
 
 -- Recording 'off' -> 'armed' (waiting to leave the pits) -> 'recording'
@@ -283,7 +307,6 @@ local gapAhead     = nil   -- road distance to the nearest oncoming car ahead
 local gapBehind    = nil   -- road distance to the nearest one already passed
 
 local function directionWord(dir)
-  -- Recording runs top to bottom, so advancing along the road is downhill.
   if dir > 0 then return 'downhill' elseif dir < 0 then return 'uphill' end
   return '?'
 end
@@ -355,7 +378,7 @@ function script.update(dt)
     if car.index ~= me.index then
       local state = others[car.index]
       if not state then
-        state = { index = nil, dir = 0, mark = nil, lost = 0 }
+        state = { index = nil, dir = 0, mark = nil, lost = 0, retry = 0 }
         others[car.index] = state
       end
 
@@ -388,8 +411,8 @@ function script.update(dt)
     local t = math.saturate(nearest / settings.range)
     beepTimer = beepTimer - dt
     if beepTimer <= 0 then
-      playBeep(pitchFor(t), settings.volume)
-      beepTimer = BEEP_FAST + BEEP_SLOW * t
+      beepTimer = intervalFor(t)
+      playBeep(settings.volume)
     end
     gapAhead = nearest
   else
@@ -414,7 +437,7 @@ function script.windowMain(dt)
 
   if recState == 'off' then
     if confirmOverwrite then
-      ui.text('Overwrite existing recording? WARNING: PERMANENT')
+      ui.text('Overwrite existing recording? WARNING: PERMANENT!')
       if ui.button('Yes, record again') then
         recState, confirmOverwrite, recMessage = 'armed', false, ''
       end
@@ -440,16 +463,13 @@ function script.windowMain(dt)
   ui.text('')
   settings.range = ui.slider('##range', settings.range, 40, 600, 'Warn within: %.0f m of road')
 
-  if ui.button(settings.staticPitch and 'Pitch: static' or 'Pitch: rises as it nears') then
-    settings.staticPitch = not settings.staticPitch
-  end
-  settings.basePitch = ui.slider('##pitch', settings.basePitch, 0.5, 2.0, 'Base pitch: %.2f')
+  settings.beepSpeed = ui.slider('##speed', settings.beepSpeed, 0.1, 2.0, 'Beep speed: %.2fx')
   settings.volume    = ui.slider('##vol', settings.volume, 0, 2, 'Volume: %.2f')
 
-  if ui.button('Test beep') then playBeep(pitchFor(0.5), settings.volume) end
+  if ui.button('Test beep') then playBeep(settings.volume) end
 
   ------------------------------------------------------------------ readout
-  ui.text('Debug:')
+  ui.text('Debug')
   if recState == 'recording' then
     ui.text('detection paused while recording')
   elseif inPits then
