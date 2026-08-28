@@ -2,8 +2,8 @@
 ## This app allowes you to detect upcoming traffic on touge roads, eliminating the need for track map.<br>A beeping sound will be heard upon a car uproaching your direction. The closer the car is, the faster is the beep.
 ### Originally created for Kaido Battle Servers, since it has two-way traffic. 
 
-#### [Video showcase](https://www.youtube.com/watch?v=vmiuKTcYoG8)
-[![Touge Spotter App](https://img.youtube.com/vi/vmiuKTcYoG8/maxresdefault.jpg)](https://www.youtube.com/watch?v=vmiuKTcYoG8)
+#### [Video showcase](https://www.youtube.com/watch?v=llSjlrsR4p4)
+[![Touge Spotter App](https://img.youtube.com/vi/llSjlrsR4p4/maxresdefault.jpg)](https://www.youtube.com/watch?v=vmiuKTcYoG8)
 
 ## Installation:
 1. Download the [latest release](https://github.com/beispielsweise/Touge-Spotter/releases)
