@@ -2,14 +2,15 @@
 ## This app allowes you to detect upcoming traffic on touge roads, eliminating the need for track map.<br>A beeping sound will be heard upon a car uproaching your direction. The closer the car is, the faster is the beep.
 ### Originally created for Kaido Battle Servers, since it has two-way traffic. 
 
-#### [Video showcase](not there yet)
+#### [Video showcase](https://www.youtube.com/watch?v=vmiuKTcYoG8)
+[![Touge Spotter App](https://img.youtube.com/vi/vmiuKTcYoG8/maxresdefault.jpg)](https://www.youtube.com/watch?v=vmiuKTcYoG8)
 
-#### Installation:
-1. Download the [latest release](https://github.com/beispielsweise/Touge-Spotter/releases/tag/1.1)
+## Installation:
+1. Download the [latest release](https://github.com/beispielsweise/Touge-Spotter/releases)
 2. Unpack the RAR archive into `your-steam-installation\steamapps\common\assettocorsa\apps\lua`
 3. The app will automatically appear on the in-game panel
 
-#### General Information:
+## General Information:
 The application is shipped supporting the following track layouts:<br>
 (layout-dependant, meaning pk_akina_akina_2way is not the same as pk_akina_akina_downhill):
 * Mt. Akina (pk_akina_akina_2way)
@@ -26,14 +27,14 @@ The application is shipped supporting the following track layouts:<br>
 > Complicated geometry (loops, bridges over roads, etc) may fail and start false-firing.<br>
 > Be aware that this app was created for touge roads, so it may not work correctly on looped tracks and/or unpopular/untested tracks.
 
-#### Settings:
+## Settings:
 * You can change the detection range in road meters (regardless of the car relative position).
 * You can change the beeping speed as a multiplier
 * You can change beeping volume
-> [!SOUND-MODIFICATION]
+> SOUND MODIFICATION<br>
 > If you want to change the sound of the beep, the file is located under `apps\lua\TougeSpotter\beep.wav` <br>
-> `beeps-alt.zip` is an archive with alternative beep sounds that should theoretically be compatible.
+> `beeps-alt.zip` is an archive with alternative beep sounds that should theoretically be compatible.<br>
 > Be aware that changing the beep sound might break the sound repeat logic if the sound is longer than 0.26, allthough a failsafe should work.<br>Do it at you own risk
 
-#### Debug:
+## Debug:
 This is purely debug data to check if the uphil/downhill is detected correctly, if the upcoming cars are detected and meter readings are correct.
