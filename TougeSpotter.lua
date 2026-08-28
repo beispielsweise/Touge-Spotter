@@ -1,4 +1,5 @@
-local BEEP = (__dirname or '.') .. '/beep.wav'
+local BEEP = (__dirname or '.') .. '/beep.wav'                  -- 1 car beep
+local BEEP_DOUBLE = (__dirname or '.') .. '/beep_double.wav'    -- 2+ car beep
 
 --------------------------------------------------------------------------
 -- Settings
@@ -7,8 +8,10 @@ local BEEP = (__dirname or '.') .. '/beep.wav'
 local DEFAULTS = {
   enabled     = true,
   range       = 300,    -- how far ahead along the road to warn about, metres
+  rangeDouble = 100,    -- when a car is considered being followed, used for calculating carsAhead
   volume      = 1.4,
   beepSpeed   = 1.0,    -- multiplies how rapidly the beeps repeat
+  multiWarn   = true,   -- double beep while two or more oncoming cars are in range
 }
 
 local ok, stored = pcall(ac.storage, DEFAULTS)
@@ -160,10 +163,10 @@ loadTrack()
 
 local beep = nil
 
-local function playBeep(volume)
+local function playBeep(volume, file)
   if not (ac and ac.AudioEvent) then return end
   if beep ~= nil then beep:dispose() end
-  beep = ac.AudioEvent.fromFile({ filename = BEEP, use3D = false, loop = false }, false)
+  beep = ac.AudioEvent.fromFile({ filename = file or BEEP, use3D = false, loop = false }, false)
   beep.volume = volume
   beep:start()
   beep.volume = volume
@@ -305,6 +308,7 @@ local wasInPits, confirmOverwrite = false, false
 local inPits       = false
 local gapAhead     = nil   -- road distance to the nearest oncoming car ahead
 local gapBehind    = nil   -- road distance to the nearest one already passed
+local carsAhead    = 0     -- how many oncoming cars are in range (this frame)
 
 local function directionWord(dir)
   if dir > 0 then return 'downhill' elseif dir < 0 then return 'uphill' end
@@ -326,6 +330,7 @@ end
 function script.update(dt)
   inPits = false
   gapAhead, gapBehind = nil, nil
+  carsAhead = 0
 
   local sim = ac.getSim(); if not sim then return end
   local me  = ac.getCar(sim.focusedCar); if not me then return end
@@ -395,8 +400,11 @@ function script.update(dt)
           -- positive is ahead, negative means already passed it.
           local gap = (along[state.index] - myAlong) * myDir
           if gap > 0 then
-            if gap <= settings.range and (nearest == nil or gap < nearest) then
-              nearest = gap
+            if gap <= settings.range + settings.rangeDouble then
+              -- Count every oncoming car in range, not only the closest. 
+              -- Once passed goes back to single beep
+              carsAhead = carsAhead + 1
+              if nearest == nil or gap < nearest then nearest = gap end
             end
           elseif gapBehind == nil or -gap < gapBehind then
             gapBehind = -gap
@@ -412,7 +420,8 @@ function script.update(dt)
     beepTimer = beepTimer - dt
     if beepTimer <= 0 then
       beepTimer = intervalFor(t)
-      playBeep(settings.volume)
+      local sample = (settings.multiWarn and carsAhead > 1) and BEEP_DOUBLE or BEEP
+      playBeep(settings.volume, sample)
     end
     gapAhead = nearest
   else
@@ -466,9 +475,20 @@ function script.windowMain(dt)
   settings.beepSpeed = ui.slider('##speed', settings.beepSpeed, 0.1, 2.0, 'Beep speed: %.2fx')
   settings.volume    = ui.slider('##vol', settings.volume, 0, 2, 'Volume: %.2f')
 
+  if ui.button(settings.multiWarn and 'Multiple cars: double beep' or 'Multiple cars: same beep') then
+    settings.multiWarn = not settings.multiWarn
+  end
+  if settings.multiWarn then
+    ui.text('Additional detection outside of range')
+    ui.slider('##rangeDouble', settings.rangeDouble, 0, 300, 'Detection: %.0f m of road')
+  end
+
+  ui.text('')
   if ui.button('Test beep') then playBeep(settings.volume) end
+  if ui.button('Test double beep') then playBeep(settings.volume, BEEP_DOUBLE) end
 
   ------------------------------------------------------------------ readout
+  ui.text('')
   ui.text('Debug')
   if recState == 'recording' then
     ui.text('detection paused while recording')
@@ -480,6 +500,8 @@ function script.windowMain(dt)
     ui.text('moving: ' .. directionWord(player.dir))
     if gapAhead ~= nil then
       ui.text(string.format('>> ONCOMING  %.0f m up the road', gapAhead))
+      ui.text(string.format('   %d in range%s', carsAhead,
+        carsAhead > 1 and ' - double beep' or ''))
     elseif gapBehind ~= nil then
       ui.text(string.format('clear (last one %.0f m behind you)', gapBehind))
     else

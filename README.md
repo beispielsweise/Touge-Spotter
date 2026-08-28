@@ -31,9 +31,11 @@ The application is shipped supporting the following track layouts:<br>
 * You can change the detection range in road meters (regardless of the car relative position).
 * You can change the beeping speed as a multiplier
 * You can change beeping volume
+* You can choose between single beep and double beep if two and more cars are approaching.
+* You can set extra detection range to search for multiple cars (base range + extra range beyound the default one)
 > SOUND MODIFICATION<br>
-> If you want to change the sound of the beep, the file is located under `apps\lua\TougeSpotter\beep.wav` <br>
-> `beeps-alt.zip` is an archive with alternative beep sounds that should theoretically be compatible.<br>
+> If you want to change the sound of the beep or the double beep, the file is located under `apps\lua\TougeSpotter\beep.wav` and `apps\lua\TougeSpotter\beep_double.wav` <br>
+> `beeps-alt.zip` and `beeps-double-alt.zip` are archives with alternative beep and beep_double sounds that should theoretically be compatible.<br>
 > Be aware that changing the beep sound might break the sound repeat logic if the sound is longer than 0.26, allthough a failsafe should work.<br>Do it at you own risk
 
 ## Debug:
