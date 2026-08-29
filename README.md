@@ -40,3 +40,6 @@ The application is shipped supporting the following track layouts:<br>
 
 ## Debug:
 This is purely debug data to check if the uphil/downhill is detected correctly, if the upcoming cars are detected and meter readings are correct.
+
+## Server extention
+This is an experemental server extention of the application. 

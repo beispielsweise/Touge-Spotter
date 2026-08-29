@@ -1,0 +1,6 @@
+[SCRIPT_1]
+SCRIPT = TougeSpotterOnline.lua
+REQUIRED = 0
+REFRESH_PERIOD = 2
+testValue = 42
+testText = hello from server config
