@@ -1,5 +1,6 @@
 local BEEP = (__dirname or '.') .. '/beep.wav'                  -- 1 car beep
 local BEEP_DOUBLE = (__dirname or '.') .. '/beep_double.wav'    -- 2+ car beep
+local BEEP_SOLID = (__dirname or '.') .. '/beep_solid.wav'  -- stopped car
 
 --------------------------------------------------------------------------
 -- Settings
@@ -8,10 +9,12 @@ local BEEP_DOUBLE = (__dirname or '.') .. '/beep_double.wav'    -- 2+ car beep
 local DEFAULTS = {
   enabled     = true,
   range       = 300,    -- how far ahead along the road to warn about, metres
-  rangeDouble = 100,    -- when a car is considered being followed, used for calculating carsAhead
   volume      = 1.4,
   beepSpeed   = 1.0,    -- multiplies how rapidly the beeps repeat
   multiWarn   = true,   -- double beep while two or more oncoming cars are in range
+  rangeMulti = 100,    -- when a car is considered being followed, used for calculating carsAhead
+  crashWarn   = true,   -- warn about cars stopped on the road ahead
+  rangeSolid  = 100,    -- inside this zone the stopped-car warning goes to a solid tone
 }
 
 local ok, stored = pcall(ac.storage, DEFAULTS)
@@ -44,6 +47,12 @@ local LOST_T       = 0.5    -- impossible readings for this long means a telepor
 -- an unrecorded side road) is retried a few times a second rather than on
 -- every frame.
 local RELOCATE_T   = 0.4    -- seconds between full-road searches, per car
+
+-- Check if a car is crashed rather than just normally progressing the course.
+local STOP_V       = 4    -- m/s along the road, below this counts as stopped
+local STOP_T       = 1.0    -- seconds it must hold before warning
+local PROG_WINDOW  = 0.5    -- s: window the progress rate is measured over
+local RECOVER_T    = 20     -- s after a stop that a car counts as manoeuvring
 
 -- Beep
 local BEEP_LEN     = 0.26   -- length of beep.wav, seconds
@@ -172,6 +181,32 @@ local function playBeep(volume, file)
   beep.volume = volume
 end
 
+local solid, solidOn = nil, false
+
+local function setSolid(wanted)
+  if wanted == solidOn then
+    if solidOn and solid then solid.volume = settings.volume end
+    return
+  end
+  solidOn = wanted
+  if wanted then
+    if solid ~= nil then
+      local okv, valid = pcall(function() return solid:isValid() end)
+      if okv and not valid then pcall(function() solid:dispose() end); solid = nil end
+    end
+    if solid == nil and ac and ac.AudioEvent then
+      solid = ac.AudioEvent.fromFile({ filename = BEEP_SOLID, use3D = false, loop = true }, false)
+    end
+    if solid ~= nil then
+      solid.volume = settings.volume
+      solid:start()
+      solid.volume = settings.volume
+    end
+  elseif solid ~= nil then
+    solid:stop()
+  end
+end
+
 -- Seconds until the next beep for a car at normalised distance t. 
 -- Never shorter than the sample takes to play.
 local function intervalFor(t)
@@ -235,6 +270,11 @@ local function forget(state, index)
   state.mark  = index and along[index] or nil
   state.lost  = 0
   state.retry = 0
+  state.prog    = STOP_V * 4   -- progress along the road, m/s (assume moving)
+  state.still   = 0            -- seconds spent below STOP_V
+  state.progRef = index and along[index] or 0
+  state.progT   = 0
+  state.recover = 0            -- s left of treating direction changes as cheap
 end
 
 -- Updates a car's direction from how its position along the road moves. The
@@ -244,6 +284,9 @@ local function updateDirection(state)
   local here = along[state.index]
   if state.mark == nil then state.mark = here end
 
+  -- mores sensitive direction change
+  local flip = state.recover > 0 and ACQUIRE_M or FLIP_M
+
   if state.dir == 0 then
     local moved = here - state.mark
     if math.abs(moved) >= ACQUIRE_M then
@@ -252,10 +295,10 @@ local function updateDirection(state)
     end
   elseif state.dir > 0 then
     if here > state.mark then state.mark = here
-    elseif here < state.mark - FLIP_M then state.dir, state.mark = -1, here end
+    elseif here < state.mark - flip then state.dir, state.mark = -1, here end
   else
     if here < state.mark then state.mark = here
-    elseif here > state.mark + FLIP_M then state.dir, state.mark = 1, here end
+    elseif here > state.mark + flip then state.dir, state.mark = 1, here end
   end
 end
 
@@ -287,8 +330,27 @@ local function trackCar(state, x, y, z, speedKmh, dt)
     return
   end
 
+  -- Progress along the road, used to spot a car that has stopped. Road position over delta
+  state.progT = state.progT + dt
+  if state.progT >= PROG_WINDOW then
+    state.prog = math.abs(along[candidate] - state.progRef) / state.progT
+    state.progRef, state.progT = along[candidate], 0
+  end
+  if state.prog < STOP_V then state.still = state.still + dt else state.still = 0 end
+
   state.lost  = 0
   state.index = candidate
+
+  -- Stopping is not evidence of a new direction, so the old one is kept: only
+  -- a teleport or a pit visit, which make the position meaningless, clear it.
+  -- What a stop does earn is the cheaper flip threshold above, which is what
+  -- lets a car that spun or reversed while recovering be re-read quickly.
+  if state.still >= STOP_T then
+    state.recover = RECOVER_T
+  elseif state.recover > 0 then
+    state.recover = state.recover - dt
+  end
+
   updateDirection(state)
 end
 
@@ -306,6 +368,8 @@ local wasInPits, confirmOverwrite = false, false
 
 -- Panel readout
 local inPits       = false
+local spectating   = false
+local gapHazard    = nil   -- road distance to the nearest stopped car ahead
 local gapAhead     = nil   -- road distance to the nearest oncoming car ahead
 local gapBehind    = nil   -- road distance to the nearest one already passed
 local carsAhead    = 0     -- how many oncoming cars are in range (this frame)
@@ -329,10 +393,22 @@ end
 --------------------------------------------------------------------------
 function script.update(dt)
   inPits = false
+  spectating = false
   gapAhead, gapBehind = nil, nil
+  gapHazard = nil
   carsAhead = 0
 
   local sim = ac.getSim(); if not sim then return end
+
+  -- Spectator beep fix
+  if sim.focusedCar ~= 0 or sim.isReplayActive then
+    spectating = true
+    beepTimer = 0
+    setSolid(false)
+    forget(player, nil)
+    return
+  end
+
   local me  = ac.getCar(sim.focusedCar); if not me then return end
 
   local pos = me.position
@@ -361,6 +437,7 @@ function script.update(dt)
   ------------------------------------------------------------------ detection
   if not settings.enabled or recState == 'recording' or #points < 2 then
     beepTimer = 0
+    setSolid(false)
     inPits = nowInPits
     return
   end
@@ -368,12 +445,13 @@ function script.update(dt)
   if nowInPits then
     inPits = true
     beepTimer = 0
+    setSolid(false)
     forget(player, nil)          -- pitting invalidates status
     return
   end
 
   trackCar(player, pos.x, pos.y, pos.z, me.speedKmh, dt)
-  if player.dir == 0 or player.index == nil then beepTimer = 0; return end
+  if player.dir == 0 or player.index == nil then beepTimer = 0; setSolid(false); return end
 
   local myDir   = player.dir
   local myAlong = along[player.index]
@@ -391,22 +469,33 @@ function script.update(dt)
         forget(state, nil)
       else
         trackCar(state, car.position.x, car.position.y, car.position.z, car.speedKmh, dt)
-
-        -- Only cars travelling the opposite way along the road are oncoming.
-        -- A stopped car keeps the direction it had while moving, so one that
-        -- crashed coming the other way still counts as a hazard ?
-        if state.dir ~= 0 and state.index ~= nil and state.dir ~= myDir then
+        -- Direction is required for the check. 
+        -- Direction decides whether a moving car matters.
+        -- Direction doesn't matter for a stopped car detection
+        if state.dir ~= 0 and state.index ~= nil then
+          local stopped = settings.crashWarn and state.still >= STOP_T
+          local oncoming = state.dir ~= 0 and state.dir ~= myDir
           -- Distance along the road, signed by our direction of travel:
           -- positive is ahead, negative means already passed it.
           local gap = (along[state.index] - myAlong) * myDir
           if gap > 0 then
-            if gap <= settings.range + settings.rangeDouble then
-              -- Count every oncoming car in range, not only the closest. 
-              -- Once passed goes back to single beep
-              carsAhead = carsAhead + 1
+            if stopped then
+              if gap <= settings.range and (gapHazard == nil or gap < gapHazard) then
+                gapHazard = gap
+              end
+            end
+            if oncoming then
+              if gap <= settings.range + settings.rangeMulti then
+                -- Count every oncoming car in range, not only the closest. 
+                -- Once passed goes back to single beep
+                carsAhead = carsAhead + 1
+              end
+            end
+            -- A stopped car sets the beep rate
+            if gap <= settings.range and (oncoming or stopped) then
               if nearest == nil or gap < nearest then nearest = gap end
             end
-          elseif gapBehind == nil or -gap < gapBehind then
+          elseif oncoming and (gapBehind == nil or -gap < gapBehind) then
             gapBehind = -gap
           end
         end
@@ -415,7 +504,14 @@ function script.update(dt)
   end
 
   ----------------------------------------------------------------- warning
-  if nearest ~= nil then
+  -- A stopped car gets a beep priority
+  local solidWanted = gapHazard ~= nil and gapHazard <= settings.rangeSolid
+  setSolid(solidWanted)
+
+  if solidWanted then
+    beepTimer = 0
+    gapAhead = nearest
+  elseif nearest ~= nil then
     local t = math.saturate(nearest / settings.range)
     beepTimer = beepTimer - dt
     if beepTimer <= 0 then
@@ -480,17 +576,29 @@ function script.windowMain(dt)
   end
   if settings.multiWarn then
     ui.text('Additional detection outside of range')
-    ui.slider('##rangeDouble', settings.rangeDouble, 0, 300, 'Detection: %.0f m of road')
+    settings.rangeMulti = ui.slider('##rangeMulti', settings.rangeMulti, 0, 300, 'Detection: %.0f m of road')
+  end
+
+  if ui.button(settings.crashWarn and 'Stopped cars: warn' or 'Stopped cars: ignore') then
+    settings.crashWarn = not settings.crashWarn
+    if not settings.crashWarn then setSolid(false) end
+  end
+  if settings.crashWarn then
+    ui.text('Solid tone once this close to a stopped car')
+    settings.rangeSolid = ui.slider('##rangeSolid', settings.rangeSolid, 20, 300, 'Solid within: %.0f m of road')
   end
 
   ui.text('')
   if ui.button('Test beep') then playBeep(settings.volume) end
   if ui.button('Test double beep') then playBeep(settings.volume, BEEP_DOUBLE) end
+  if ui.button('Test solid beep') then playBeep(settings.volume, BEEP_SOLID) end
 
   ------------------------------------------------------------------ readout
   ui.text('')
   ui.text('Debug')
-  if recState == 'recording' then
+  if spectating then
+    ui.text('spectating - detection paused')
+  elseif recState == 'recording' then
     ui.text('detection paused while recording')
   elseif inPits then
     ui.text('in pits - detection paused')
@@ -498,6 +606,10 @@ function script.windowMain(dt)
     ui.text('no road recording - silent')
   else
     ui.text('moving: ' .. directionWord(player.dir))
+    if gapHazard ~= nil then
+      ui.text(string.format('>> STOPPED CAR  %.0f m up the road%s', gapHazard,
+        gapHazard <= settings.rangeSolid and ' - solid tone' or ''))
+    end
     if gapAhead ~= nil then
       ui.text(string.format('>> ONCOMING  %.0f m up the road', gapAhead))
       ui.text(string.format('   %d in range%s', carsAhead,
