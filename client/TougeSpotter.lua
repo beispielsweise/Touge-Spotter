@@ -13,7 +13,7 @@ local DEFAULTS = {
   beepSpeed   = 1.0,    -- multiplies how rapidly the beeps repeat
   multiWarn   = true,   -- double beep while two or more oncoming cars are in range
   rangeMulti = 100,    -- when a car is considered being followed, used for calculating carsAhead
-  crashWarn   = true,   -- warn about cars stopped on the road ahead
+  crashWarn   = false,   -- warn about cars stopped on the road ahead
   rangeSolid  = 100,    -- inside this zone the stopped-car warning goes to a solid tone
 }
 
